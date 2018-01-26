@@ -113,6 +113,7 @@ func (c *Client) Run(ctx context.Context, req *Request, resp interface{}) error 
 	gr := &graphResponse{
 		Data: resp,
 	}
+  c.logf(">> %s", requestBody.String())
 
 	r, err := http.NewRequest(http.MethodPost, c.endpoint, &requestBody)
 	if err != nil {
@@ -126,6 +127,8 @@ func (c *Client) Run(ctx context.Context, req *Request, resp interface{}) error 
 		return err
 	}
 	defer res.Body.Close()
+
+  c.logf("<< %+v", res)
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, res.Body); err != nil {
 		return errors.Wrap(err, "reading body")
