@@ -126,6 +126,9 @@ func (c *Client) Run(ctx context.Context, req *Request, resp interface{}) error 
 	if err != nil {
 		return err
 	}
+  if res.StatusCode != http.StatusOK {
+    return errors.New("Request failed " + res.Status)
+  }
 	defer res.Body.Close()
 
   c.logf("<< %+v", res)
