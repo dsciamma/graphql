@@ -46,6 +46,7 @@ import (
 type Client struct {
 	endpoint   string
 	httpClient *http.Client
+  requestType string
 
 	// Log is called with various debug information.
 	// To log to standard out, use:
@@ -65,11 +66,68 @@ func NewClient(endpoint string, opts ...ClientOption) *Client {
 	if c.httpClient == nil {
 		c.httpClient = http.DefaultClient
 	}
+  if (c.requestType == "") {
+    c.requestType = "Multipart"
+  }
 	return c
 }
 
 func (c *Client) logf(format string, args ...interface{}) {
 	c.Log(fmt.Sprintf(format, args...))
+}
+
+
+func (c *Client)  constructRequestBody(req *Request) (SerializedRequest, error) {
+  var srReq SerializedRequest
+  var requestBody bytes.Buffer
+  c.logf(">> vars:%+v files:%d query:%s", req.vars, len(req.files), req.q)
+  switch c.requestType {
+  case "Inline":
+    in := struct {
+      Query     string                 `json:"query"`
+      Variables map[string]interface{} `json:"variables,omitempty"`
+    }{
+      Query:     req.q,
+      Variables: req.vars,
+    }
+    err := json.NewEncoder(&requestBody).Encode(in)
+    if err != nil {
+      return srReq, err
+    }
+
+    srReq.Body = requestBody
+    srReq.ContentType = "application/json"
+  default:
+    writer := multipart.NewWriter(&requestBody)
+    if err := writer.WriteField("query", req.q); err != nil {
+      return srReq, errors.Wrap(err, "write query field")
+    }
+    if len(req.vars) > 0 {
+      variablesField, err := writer.CreateFormField("variables")
+      if err != nil {
+        return srReq, errors.Wrap(err, "create variables field")
+      }
+      if err := json.NewEncoder(variablesField).Encode(req.vars); err != nil {
+        return srReq, errors.Wrap(err, "encode variables")
+      }
+    }
+    for i := range req.files {
+      part, err := writer.CreateFormFile(req.files[i].Field, req.files[i].Name)
+      if err != nil {
+        return srReq, errors.Wrap(err, "create form file")
+      }
+      if _, err := io.Copy(part, req.files[i].R); err != nil {
+        return srReq, errors.Wrap(err, "preparing file")
+      }
+    }
+    if err := writer.Close(); err != nil {
+      return srReq, errors.Wrap(err, "close writer")
+    }
+
+    srReq.Body = requestBody
+    srReq.ContentType = writer.FormDataContentType()
+  }
+  return srReq, nil
 }
 
 // Run executes the query and unmarshals the response from the data field
@@ -83,43 +141,20 @@ func (c *Client) Run(ctx context.Context, req *Request, resp interface{}) error 
 		return ctx.Err()
 	default:
 	}
-	var requestBody bytes.Buffer
-	writer := multipart.NewWriter(&requestBody)
-	if err := writer.WriteField("query", req.q); err != nil {
-		return errors.Wrap(err, "write query field")
-	}
-	if len(req.vars) > 0 {
-		variablesField, err := writer.CreateFormField("variables")
-		if err != nil {
-			return errors.Wrap(err, "create variables field")
-		}
-		if err := json.NewEncoder(variablesField).Encode(req.vars); err != nil {
-			return errors.Wrap(err, "encode variables")
-		}
-	}
-	for i := range req.files {
-		part, err := writer.CreateFormFile(req.files[i].Field, req.files[i].Name)
-		if err != nil {
-			return errors.Wrap(err, "create form file")
-		}
-		if _, err := io.Copy(part, req.files[i].R); err != nil {
-			return errors.Wrap(err, "preparing file")
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return errors.Wrap(err, "close writer")
-	}
-	c.logf(">> vars:%+v files:%d query:%s", req.vars, len(req.files), req.q)
+	serializedRequest, err := c.constructRequestBody(req)
+  if err != nil {
+    return err
+  }
 	gr := &graphResponse{
 		Data: resp,
 	}
-  c.logf(">> %s", requestBody.String())
+  c.logf(">> %s", serializedRequest.Body.String())
 
-	r, err := http.NewRequest(http.MethodPost, c.endpoint, &requestBody)
+	r, err := http.NewRequest(http.MethodPost, c.endpoint, &serializedRequest.Body)
 	if err != nil {
 		return err
 	}
-	r.Header.Set("Content-Type", writer.FormDataContentType())
+	r.Header.Set("Content-Type", serializedRequest.ContentType)
 	r.Header.Set("Accept", "application/json")
 	r = r.WithContext(ctx)
 	res, err := c.httpClient.Do(r)
@@ -156,6 +191,13 @@ func WithHTTPClient(httpclient *http.Client) ClientOption {
 	})
 }
 
+// UseInlineJSON specifies the GraphQL payload should be sent using inline JSON
+func UseInlineJSON() ClientOption {
+  return ClientOption(func(client *Client) {
+    client.requestType = "Inline"
+  })
+}
+
 // ClientOption are functions that are passed into NewClient to
 // modify the behaviour of the Client.
 type ClientOption func(*Client)
@@ -178,6 +220,13 @@ type Request struct {
 	q     string
 	vars  map[string]interface{}
 	files []file
+}
+
+// SerializedRequest is the serialized version of the GraphQL request
+// and the associated content type
+type SerializedRequest struct {
+  Body         bytes.Buffer
+  ContentType  string
 }
 
 // NewRequest makes a new Request with the specified string.
